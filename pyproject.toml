@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic_rag"
+version = "0.1.0"
+description = "Collection of agentic tools for code generation and retrieval augmented generation"
+authors = [
+  { name = "Your Name", email = "your_email@example.com" }
+]
+requires-python = "==3.11.11"
+dependencies = [
+  "typer",
+  "rich",
+  "questionary",
+  "langchain",
+  "langchain-community",
+  "langchain-huggingface",
+  "langchain-core",
+  "chromadb",
+  "sentence-transformers",
+  "tiktoken",
+  "backoff",
+  "tenacity", 
+  "datasets",
+  "transformers",
+  "openai",
+  "numpy",
+  "huggingface-hub",
+  "tokenizers",
+  "ruff",
+  "pypdf",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "black",
+  "ruff"
+]
+
+[project.scripts]
+agentic-rag = "agentic_rag.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agentic_rag*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "N", "UP", "PL", "RUF"]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
