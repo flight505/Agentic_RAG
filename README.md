@@ -139,6 +139,12 @@ flowchart TD
    - Dynamic strategy adjustment based on performance metrics
    - Adaptive thresholds for optimization (default: 0.8)
 
+## Detailed Architecture Overview
+
+Our Reflective Agentic RAG System is designed to be highly modular and adaptive. The **Query Processor** leverages zero-shot classification to decipher user intent and decompose complex queries into manageable sub-queries. The **Knowledge Base** employs advanced document chunking and semantic embeddings to efficiently retrieve relevant information. The **Agent Orchestrator** synchronizes multiple specialized agents – including the Search, Reasoning, and Response Agents – to generate coherent and context-aware responses. Moreover, the **Reflective Layer** continuously monitors the system's performance using key metrics and dynamically adjusts retrieval strategies to maintain optimal output quality.
+
+For a more comprehensive breakdown of these components and the underlying design decisions, please refer to our in-depth blog post: [Reflective Agentic RAG System Architecture](Reflective%20Agentic%20RAG%20System%20Architecture.md).
+
 ## Command Line Interface
 
 The system includes a comprehensive CLI for easy interaction:
