@@ -86,6 +86,44 @@ flowchart TD
         Strategy --> Threshold
         Threshold --> History
     end
+
+    %% External Services
+    subgraph External[External Services]
+        direction LR
+        DeepSeek[DeepSeek LLM API]
+        HuggingFace[HuggingFace Models]
+    end
+
+    %% Connections
+    Query --> QueryProcessor
+    QueryProcessor --> KnowledgeBase
+    KnowledgeBase --> Search
+    
+    ResponseAgent --> Response
+    
+    %% External Service Connections
+    DeepSeek -.-> ResponseAgent
+    HuggingFace -.-> Embed
+    
+    %% Reflective Layer Connections
+    ResponseAgent --> Metrics
+    Reflective --> |Strategy Updates| Search
+    Reflective --> |Performance Monitoring| Reason
+
+    %% Neo Theme Enhancements
+    classDef processor fill:#24283b,stroke:#7aa2f7,stroke-width:2px,color:#c0caf5
+    classDef knowledge fill:#24283b,stroke:#7dcfff,stroke-width:2px,color:#c0caf5
+    classDef agent fill:#24283b,stroke:#bb9af7,stroke-width:2px,color:#c0caf5
+    classDef reflective fill:#24283b,stroke:#9ece6a,stroke-width:2px,color:#c0caf5
+    classDef external fill:#24283b,stroke:#e0af68,stroke-width:2px,color:#c0caf5
+    classDef subcomponent fill:#1a1b26,stroke:#565f89,stroke-width:1px,color:#c0caf5
+    
+    class QueryProcessor processor
+    class KnowledgeBase knowledge
+    class AgentOrchestrator agent
+    class Reflective reflective
+    class External external
+    class Intent,Decomp,DocProcess,TextSplit,VectorStore,Embed,TopK,RelScore,Context,CoT,Generate,Format,Metrics,Strategy,Threshold,History subcomponent
 ```
 
 Let's break down each component and understand what makes this system special.
