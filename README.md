@@ -7,6 +7,11 @@ A sophisticated Retrieval-Augmented Generation (RAG) system implementing reflect
 The system is built on a modular architecture with four primary components:
 
 ```mermaid
+---
+config:
+  look: neo
+  theme: neo
+---
 flowchart TD
     %% Main Components
     Query[Query Input]
@@ -139,6 +144,11 @@ flowchart TD
 The system includes a comprehensive CLI for easy interaction:
 
 ```mermaid
+---
+config:
+  look: neo
+  theme: neo
+---
 flowchart TD
     %% Main Menu
     Start([Start]) --> MainMenu{Main Menu}
