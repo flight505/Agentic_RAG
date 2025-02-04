@@ -96,13 +96,13 @@ flowchart TD
     Reflective --> |Strategy Updates| Search
     Reflective --> |Performance Monitoring| Reason
     
-    %% Styling
-    classDef processor fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    classDef knowledge fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    classDef agent fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    classDef reflective fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    classDef external fill:#dcfce7,stroke:#16a34a,stroke-width:2px
-    classDef subcomponent fill:#f1f5f9,stroke:#94a3b8,stroke-width:1px
+    %% Tokyo Night Storm Theme Styling
+    classDef processor fill:#24283b,stroke:#7aa2f7,stroke-width:2px,color:#c0caf5
+    classDef knowledge fill:#24283b,stroke:#7dcfff,stroke-width:2px,color:#c0caf5
+    classDef agent fill:#24283b,stroke:#bb9af7,stroke-width:2px,color:#c0caf5
+    classDef reflective fill:#24283b,stroke:#9ece6a,stroke-width:2px,color:#c0caf5
+    classDef external fill:#24283b,stroke:#e0af68,stroke-width:2px,color:#c0caf5
+    classDef subcomponent fill:#1a1b26,stroke:#565f89,stroke-width:1px,color:#c0caf5
     
     class QueryProcessor processor
     class KnowledgeBase knowledge
@@ -186,14 +186,15 @@ flowchart TD
     MetricsExist --> |Yes| ShowMetrics[Display Metrics]
     MetricsExist --> |No| NoMetrics[Show No Metrics Message]
 
-    classDef menu fill:#f9f,stroke:#333,stroke-width:2px
-    classDef process fill:#bbf,stroke:#333,stroke-width:1px
-    classDef decision fill:#fda,stroke:#333,stroke-width:2px
-    classDef terminator fill:#dfd,stroke:#333,stroke-width:2px
+    %% Tokyo Night Storm Theme Styling
+    classDef menu fill:#24283b,stroke:#7aa2f7,stroke-width:2px,color:#c0caf5
+    classDef process fill:#1a1b26,stroke:#7dcfff,stroke-width:1px,color:#c0caf5
+    classDef decision fill:#24283b,stroke:#bb9af7,stroke-width:2px,color:#c0caf5
+    classDef terminator fill:#24283b,stroke:#9ece6a,stroke-width:2px,color:#c0caf5
     
     class MainMenu,PDFMenu,QueryMenu menu
-    class LoadProgress,ProcessQuestion,ShowMetrics process
-    class ValidatePath,ValidateDir,MetricsExist decision
+    class LoadProgress,ProcessQuestion,ShowMetrics,UpdateLoadedPDFs,ListPDFs,SelectPDFs,BatchProgress,AskQuestion,ViewPrevious,LoadMetrics,ShowMetrics,NoMetrics process
+    class ValidatePath,ValidateDir,MetricsExist,RetryPrompt,RetryDir decision
     class Start,Exit terminator
 ```
 
