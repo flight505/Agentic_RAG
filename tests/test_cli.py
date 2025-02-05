@@ -1,10 +1,11 @@
 import os
-import pytest
-from pathlib import Path
-from typer.testing import CliRunner
-from agentic_rag.cli import app, RAGSingleton, _loaded_pdfs
 from unittest.mock import patch
+
+import pytest
 from rich.console import Console
+from typer.testing import CliRunner
+
+from agentic_rag.cli import RAGSingleton, _loaded_pdfs, app
 
 # Use a non-interactive console for testing
 console = Console(force_terminal=False)

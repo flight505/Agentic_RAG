@@ -2,18 +2,17 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import numpy as np
-from chromadb.config import Settings
+import torch
+from chromadb import Settings as ChromaSettings
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
 from rich.console import Console
-import torch
-from tqdm.auto import tqdm
 
 # Initialize console for rich output
 console = Console()
@@ -34,13 +33,13 @@ except ImportError:
 
 try:
     from langchain_huggingface import HuggingFaceEmbeddings
-
-    HUGGINGFACE_AVAILABLE = True
+    from langchain_openai import OpenAIEmbeddings
+    EMBEDDINGS_AVAILABLE = True
 except ImportError:
     console.print(
-        "[red]Warning: langchain-huggingface package not available. Embedding features will be disabled.[/red]"
+        "[red]Warning: embedding packages not available. Vector store functionality will be disabled.[/red]"
     )
-    HUGGINGFACE_AVAILABLE = False
+    EMBEDDINGS_AVAILABLE = False
 
 # Add constants at the top of the file after imports
 PERFORMANCE_THRESHOLD = 0.8  # Threshold for strategy adjustment
@@ -53,9 +52,11 @@ class RAGConfig:
     llm_deployment_name: str = None  # For Azure deployment
 
     # Embedding Configuration
-    embedding_api_key: str = None  # If using API-based embeddings
-    embedding_model: str = "Salesforce/SFR-Embedding-Mistral"  # High-performance embedding model
-    embedding_dimensions: int = 4096  # Dimensions for SFR-Embedding-Mistral
+    embedding_provider: str = "openai"  # 'openai' or 'local'
+    openai_embedding_model: str = "text-embedding-3-large"  # OpenAI's best model
+    openai_dimensions: int = 3072  # Can be reduced for performance/cost tradeoff
+    local_embedding_model: str = "sentence-transformers/all-mpnet-base-v2"  # Fallback local model
+    local_dimensions: int = 768  # Local model dimensions
 
     # RAG Configuration
     chunk_size: int = 500
@@ -65,6 +66,9 @@ class RAGConfig:
     def __post_init__(self):
         if not self.llm_api_key or not self.llm_api_base_url:
             raise ValueError("LLM API key and base URL are required")
+        
+        if self.embedding_provider not in ["openai", "local"]:
+            raise ValueError("embedding_provider must be either 'openai' or 'local'")
 
 
 class DeepseekQuery:
@@ -74,7 +78,8 @@ class DeepseekQuery:
         self.kluster_key = os.getenv("KLUSTER_API_KEY")
         self.use_kluster = bool(self.kluster_key)
 
-    def get_deepseek_response(self, system_content, user_content):
+    def get_deepseek_response(self, system_content: str, user_content: str) -> str:
+        """Get response from DeepSeek or Kluster AI with proper fallback."""
         try:
             if self.use_kluster:
                 client = OpenAI(
@@ -82,7 +87,7 @@ class DeepseekQuery:
                     base_url="https://api.kluster.ai/v1"
                 )
                 response = client.chat.completions.create(
-                    model="deepseek-ai/DeepSeek-R1",  # Explicitly using DeepSeek-R1
+                    model="deepseek-ai/DeepSeek-R1",  # Using Kluster's DeepSeek-R1
                     messages=[
                         {"role": "system", "content": system_content},
                         {"role": "user", "content": user_content},
@@ -92,7 +97,10 @@ class DeepseekQuery:
                     stream=False,
                 )
             else:
-                client = OpenAI(api_key=self.config.llm_api_key, base_url=self.config.llm_api_base_url)
+                client = OpenAI(
+                    api_key=self.config.llm_api_key,
+                    base_url=self.config.llm_api_base_url
+                )
                 response = client.chat.completions.create(
                     model="deepseek-chat",
                     messages=[
@@ -104,15 +112,14 @@ class DeepseekQuery:
                     stream=False,
                 )
             
-            if response:
+            if response and response.choices:
                 return response.choices[0].message.content
-            else:
-                raise Exception("Error: No response received")
+            raise Exception("Error: No response content received")
                 
         except Exception as e:
             console.print(f"[red]Error in LLM query: {e!s}[/red]")
-            # Fallback to alternative model if Deepseek fails
-            if not self.use_kluster:
+            # Fallback to Kluster if DeepSeek fails
+            if not self.use_kluster and self.kluster_key:
                 self.use_kluster = True
                 return self.get_deepseek_response(system_content, user_content)
             raise
@@ -159,24 +166,55 @@ class KnowledgeBase:
         self.collection_name = collection_name
         self.persist_directory = os.path.join(os.getcwd(), "knowledge_bases", collection_name)
         
-        if not HUGGINGFACE_AVAILABLE:
+        if not EMBEDDINGS_AVAILABLE:
             console.print(
-                "[red]Error: HuggingFace embeddings not available. Vector store functionality will be limited.[/red]"
+                "[red]Error: Embedding packages not available. Vector store functionality will be disabled.[/red]"
             )
             self.embeddings = None
         else:
             try:
-                console.print("[cyan]Loading embedding model...[/cyan]")
-                with console.status("[bold green]Downloading model...") as status:
+                console.print("[cyan]Initializing embeddings...[/cyan]")
+                if config.embedding_provider == "openai":
+                    console.print("[bold green]Setting up OpenAI embeddings...")
+                    self.embeddings = OpenAIEmbeddings(
+                        model=config.openai_embedding_model,
+                        dimensions=config.openai_dimensions,
+                        client=OpenAI()  # Use default client configuration
+                    )
+                    console.print(
+                        f"[green]Successfully initialized OpenAI embeddings: "
+                        f"{config.openai_embedding_model} ({config.openai_dimensions} dimensions)[/green]"
+                    )
+                else:
+                    console.print("[bold green]Loading local embedding model...")
                     self.embeddings = HuggingFaceEmbeddings(
-                        model_name=config.embedding_model,
+                        model_name=config.local_embedding_model,
                         model_kwargs={"device": DEVICE},
                         encode_kwargs={"normalize_embeddings": True}
                     )
-                console.print(f"[green]Successfully loaded embedding model: {config.embedding_model} on {DEVICE}[/green]")
+                    console.print(
+                        f"[green]Successfully loaded local model: "
+                        f"{config.local_embedding_model} on {DEVICE}[/green]"
+                    )
             except Exception as e:
                 console.print(f"[red]Error initializing embeddings: {e!s}[/red]")
-                self.embeddings = None
+                if config.embedding_provider == "openai":
+                    console.print("[yellow]Falling back to local embeddings...[/yellow]")
+                    try:
+                        self.embeddings = HuggingFaceEmbeddings(
+                            model_name=config.local_embedding_model,
+                            model_kwargs={"device": DEVICE},
+                            encode_kwargs={"normalize_embeddings": True}
+                        )
+                        console.print(
+                            f"[green]Successfully loaded fallback model: "
+                            f"{config.local_embedding_model}[/green]"
+                        )
+                    except Exception as e2:
+                        console.print(f"[red]Error loading fallback embeddings: {e2!s}[/red]")
+                        self.embeddings = None
+                else:
+                    self.embeddings = None
 
         self.vector_store = None
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -186,8 +224,8 @@ class KnowledgeBase:
         # Create persist directory with proper permissions
         os.makedirs(self.persist_directory, mode=0o755, exist_ok=True)
         
-        # Initialize ChromaDB settings
-        self.chroma_settings = Settings(
+        # Initialize ChromaDB settings with new format
+        self.chroma_settings = ChromaSettings(
             is_persistent=True,
             persist_directory=self.persist_directory,
             anonymized_telemetry=False
@@ -271,7 +309,8 @@ class KnowledgeBase:
                         documents=split_docs,
                         embedding=self.embeddings,
                         persist_directory=self.persist_directory,
-                        collection_name=self.collection_name
+                        collection_name=self.collection_name,
+                        client_settings=self.chroma_settings
                     )
                 else:
                     self.vector_store.add_documents(split_docs)
@@ -309,8 +348,11 @@ class KnowledgeBase:
         
         try:
             doc_count = len(self.vector_store._collection.get()["ids"])
-            size = sum(os.path.getsize(os.path.join(self.persist_directory, f)) 
-                      for f in os.listdir(self.persist_directory) if os.path.isfile(os.path.join(self.persist_directory, f)))
+            size = sum(
+                os.path.getsize(os.path.join(self.persist_directory, f))
+                for f in os.listdir(self.persist_directory)
+                if os.path.isfile(os.path.join(self.persist_directory, f))
+            )
             return {
                 "name": self.collection_name,
                 "document_count": doc_count,
@@ -325,16 +367,7 @@ class KnowledgeBase:
             }
 
     def benchmark_retrieval(self, test_queries: list[str], relevant_docs: list[list[str]], k: int = 4) -> dict:
-        """Benchmark retrieval performance.
-        
-        Args:
-            test_queries: List of test queries
-            relevant_docs: List of lists containing relevant document IDs for each query
-            k: Number of documents to retrieve
-            
-        Returns:
-            Dictionary containing performance metrics
-        """
+        """Benchmark retrieval performance."""
         if not self.vector_store:
             raise ValueError("No documents ingested yet!")
             
@@ -344,7 +377,7 @@ class KnowledgeBase:
             "retrieval_time": []
         }
         
-        for query, relevant in zip(test_queries, relevant_docs):
+        for query, relevant in zip(test_queries, relevant_docs, strict=True):
             start_time = time.time()
             retrieved = self.vector_store.similarity_search(query, k=k)
             retrieval_time = time.time() - start_time
@@ -370,6 +403,16 @@ class KnowledgeBase:
             "model_name": self.config.embedding_model,
             "embedding_dimensions": self.config.embedding_dimensions
         }
+
+    def reset_vector_store(self) -> None:
+        """Reset the vector store using Chroma's native reset method and clear the in-memory reference."""
+        if self.vector_store:
+            try:
+                self.vector_store._client.reset()
+                console.print(f"[green]Vector store reset successfully.[/green]")
+            except Exception as e:
+                console.print(f"[red]Error resetting vector store: {e!s}[/red]")
+            self.vector_store = None
 
 
 class Agent:
@@ -499,7 +542,10 @@ class ReflectiveRAG:
         with console.status("[cyan]Processing query...") as status:
             status.update("[cyan]Understanding query intent...")
             query_info = self.query_processor.understand_query(query)
-            console.print(f"[green]Detected query intent: {query_info['intent']} (confidence: {query_info['confidence']:.2f})[/green]")
+            console.print(
+                f"[green]Detected query intent: {query_info['intent']} "
+                f"(confidence: {query_info['confidence']:.2f})[/green]"
+            )
             
             status.update("[cyan]Decomposing query...")
             sub_queries = self.query_processor.decompose_query(query_info)

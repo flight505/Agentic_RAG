@@ -17,8 +17,9 @@ dependencies = [
   "langchain",
   "langchain-community",
   "langchain-huggingface",
-  "langchain-core",
-  "chromadb",
+  "langchain-core==0.3.33",
+  "langchain-openai==0.3.3",
+  "chromadb==0.6.2",
   "sentence-transformers",
   "tiktoken",
   "backoff",
@@ -31,14 +32,18 @@ dependencies = [
   "tokenizers",
   "ruff",
   "pypdf",
+  "psutil",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest",
   "pytest-cov",
+  "pytest-mock",
+  "pytest-asyncio",
   "black",
-  "ruff"
+  "ruff",
+  "fpdf",
 ]
 
 [project.scripts]
