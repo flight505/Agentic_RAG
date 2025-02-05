@@ -16,6 +16,7 @@ dependencies = [
     { name = "langchain-huggingface" },
     { name = "numpy" },
     { name = "openai" },
+    { name = "pypdf" },
     { name = "questionary" },
     { name = "rich" },
     { name = "ruff" },
@@ -48,6 +49,7 @@ requires-dist = [
     { name = "langchain-huggingface" },
     { name = "numpy" },
     { name = "openai" },
+    { name = "pypdf" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "questionary" },
@@ -1616,6 +1618,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7c/2d/c3338d48ea6cc0feb8446d8e6937e1408088a72a39937982cc6111d17f84/pygments-2.19.1.tar.gz", hash = "sha256:61c16d2a8576dc0649d9f39e089b5f02bcd27fba10d8fb4dcc28173f7a45151f", size = 4968581 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/0b/9fcc47d19c48b59121088dd6da2488a49d5f72dacf8262e2790a1d2c7d15/pygments-2.19.1-py3-none-any.whl", hash = "sha256:9ea1544ad55cecf4b8242fab6dd35a93bbce657034b0611ee383099054ab6d8c", size = 1225293 },
+]
+
+[[package]]
+name = "pypdf"
+version = "5.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/8b/14ab0db77d1287922e1d3e69cf3dbeee718133e109913b92c6cffe7b1f2e/pypdf-5.2.0.tar.gz", hash = "sha256:7c38e68420f038f2c4998fd9d6717b6db4f6cef1642e9cf384d519c9cf094663", size = 5020162 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/6e/9aa158121eb5a6af5537af0bde9e38092a97c40a5a0ecaec7cc9688b2c2e/pypdf-5.2.0-py3-none-any.whl", hash = "sha256:d107962ec45e65e3bd10c1d9242bdbbedaa38193c9e3a6617bd6d996e5747b19", size = 298686 },
 ]
 
 [[package]]

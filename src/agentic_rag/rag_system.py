@@ -1,17 +1,26 @@
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Any
+from pathlib import Path
 
 import numpy as np
+from chromadb.config import Settings
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
 from rich.console import Console
+import torch
+from tqdm.auto import tqdm
 
 # Initialize console for rich output
 console = Console()
+
+# Device configuration
+DEVICE = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+console.print(f"[green]Using device: {DEVICE}[/green]")
 
 # Core dependencies with error handling
 try:
@@ -45,7 +54,8 @@ class RAGConfig:
 
     # Embedding Configuration
     embedding_api_key: str = None  # If using API-based embeddings
-    embedding_model: str = "sentence-transformers/all-mpnet-base-v2"  # Default to local model
+    embedding_model: str = "Salesforce/SFR-Embedding-Mistral"  # High-performance embedding model
+    embedding_dimensions: int = 4096  # Dimensions for SFR-Embedding-Mistral
 
     # RAG Configuration
     chunk_size: int = 500
@@ -61,23 +71,51 @@ class DeepseekQuery:
     def __init__(self, config: RAGConfig):
         self.config = config
         self.headers = {"Content-Type": "application/json", "Authorization": f"Bearer {config.llm_api_key}"}
+        self.kluster_key = os.getenv("KLUSTER_API_KEY")
+        self.use_kluster = bool(self.kluster_key)
 
     def get_deepseek_response(self, system_content, user_content):
-        client = OpenAI(api_key=self.config.llm_api_key, base_url=self.config.llm_api_base_url)
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=1024,
-            temperature=0.7,
-            stream=False,
-        )
-        if response:
-            return response.choices[0].message.content
-        else:
-            raise Exception(f"Error {response.status_code}: {response.text}")
+        try:
+            if self.use_kluster:
+                client = OpenAI(
+                    api_key=self.kluster_key,
+                    base_url="https://api.kluster.ai/v1"
+                )
+                response = client.chat.completions.create(
+                    model="deepseek-ai/DeepSeek-R1",  # Explicitly using DeepSeek-R1
+                    messages=[
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=1024,
+                    temperature=0.7,
+                    stream=False,
+                )
+            else:
+                client = OpenAI(api_key=self.config.llm_api_key, base_url=self.config.llm_api_base_url)
+                response = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=1024,
+                    temperature=0.7,
+                    stream=False,
+                )
+            
+            if response:
+                return response.choices[0].message.content
+            else:
+                raise Exception("Error: No response received")
+                
+        except Exception as e:
+            console.print(f"[red]Error in LLM query: {e!s}[/red]")
+            # Fallback to alternative model if Deepseek fails
+            if not self.use_kluster:
+                self.use_kluster = True
+                return self.get_deepseek_response(system_content, user_content)
+            raise
 
 
 class QueryProcessor:
@@ -116,8 +154,11 @@ class QueryProcessor:
 
 
 class KnowledgeBase:
-    def __init__(self, config: RAGConfig):
+    def __init__(self, config: RAGConfig, collection_name: str = "default"):
         self.config = config
+        self.collection_name = collection_name
+        self.persist_directory = os.path.join(os.getcwd(), "knowledge_bases", collection_name)
+        
         if not HUGGINGFACE_AVAILABLE:
             console.print(
                 "[red]Error: HuggingFace embeddings not available. Vector store functionality will be limited.[/red]"
@@ -125,7 +166,14 @@ class KnowledgeBase:
             self.embeddings = None
         else:
             try:
-                self.embeddings = HuggingFaceEmbeddings(model_name=config.embedding_model)
+                console.print("[cyan]Loading embedding model...[/cyan]")
+                with console.status("[bold green]Downloading model...") as status:
+                    self.embeddings = HuggingFaceEmbeddings(
+                        model_name=config.embedding_model,
+                        model_kwargs={"device": DEVICE},
+                        encode_kwargs={"normalize_embeddings": True}
+                    )
+                console.print(f"[green]Successfully loaded embedding model: {config.embedding_model} on {DEVICE}[/green]")
             except Exception as e:
                 console.print(f"[red]Error initializing embeddings: {e!s}[/red]")
                 self.embeddings = None
@@ -134,6 +182,29 @@ class KnowledgeBase:
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap
         )
+        
+        # Create persist directory with proper permissions
+        os.makedirs(self.persist_directory, mode=0o755, exist_ok=True)
+        
+        # Initialize ChromaDB settings
+        self.chroma_settings = Settings(
+            is_persistent=True,
+            persist_directory=self.persist_directory,
+            anonymized_telemetry=False
+        )
+        
+        # Try to load existing vector store
+        try:
+            if os.path.exists(self.persist_directory) and os.listdir(self.persist_directory):
+                self.vector_store = Chroma(
+                    persist_directory=self.persist_directory,
+                    embedding_function=self.embeddings,
+                    collection_name=self.collection_name,
+                    client_settings=self.chroma_settings
+                )
+                console.print(f"[green]Loaded existing knowledge base: {self.collection_name}[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Could not load existing knowledge base: {e}[/yellow]")
 
     def ingest_pdf(self, pdf_path: str) -> None:
         """Ingest a single PDF file into the knowledge base."""
@@ -146,11 +217,17 @@ class KnowledgeBase:
             split_docs = self.text_splitter.split_documents(docs)
             
             if self.vector_store is None:
-                self.vector_store = Chroma.from_documents(documents=split_docs, embedding=self.embeddings)
+                self.vector_store = Chroma.from_documents(
+                    documents=split_docs,
+                    embedding=self.embeddings,
+                    persist_directory=self.persist_directory,
+                    collection_name=self.collection_name,
+                    client_settings=self.chroma_settings
+                )
             else:
                 self.vector_store.add_documents(split_docs)
-                
-            console.print(f"[green]Successfully processed PDF: {pdf_path}[/green]")
+            
+            console.print(f"[green]Successfully processed and persisted PDF: {pdf_path}[/green]")
         except Exception as e:
             console.print(f"[red]Error processing PDF {pdf_path}: {e!s}[/red]")
             raise
@@ -161,29 +238,44 @@ class KnowledgeBase:
 
         if source_type == "text":
             docs = []
-            for doc in documents:
-                try:
-                    with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as temp_file:
-                        temp_file.write(doc)
-                        temp_file_path = temp_file.name
-                    docs.extend(TextLoader(temp_file_path, encoding="utf-8").load())
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    console.print(f"[red]Error processing document: {e!s}[/red]")
+            with console.status("[cyan]Processing text documents...") as status:
+                for i, doc in enumerate(documents, 1):
+                    try:
+                        status.update(f"[cyan]Processing document {i}/{len(documents)}...")
+                        with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as temp_file:
+                            temp_file.write(doc)
+                            temp_file_path = temp_file.name
+                        docs.extend(TextLoader(temp_file_path, encoding="utf-8").load())
+                        os.remove(temp_file_path)
+                    except Exception as e:
+                        console.print(f"[red]Error processing document {i}: {e!s}[/red]")
         elif source_type == "pdf":
             docs = []
-            for doc in documents:
-                try:
-                    docs.extend(PyPDFLoader(doc).load())
-                except Exception as e:
-                    console.print(f"[red]Error loading PDF {doc}: {e!s}[/red]")
+            with console.status("[cyan]Processing PDF documents...") as status:
+                for i, doc in enumerate(documents, 1):
+                    try:
+                        status.update(f"[cyan]Processing PDF {i}/{len(documents)}: {Path(doc).name}...")
+                        docs.extend(PyPDFLoader(doc).load())
+                    except Exception as e:
+                        console.print(f"[red]Error loading PDF {doc}: {e!s}[/red]")
 
         if not docs:
             raise ValueError("No documents were successfully processed")
 
         try:
-            split_docs = self.text_splitter.split_documents(docs)
-            self.vector_store = Chroma.from_documents(documents=split_docs, embedding=self.embeddings)
+            with console.status("[cyan]Splitting documents...") as status:
+                split_docs = self.text_splitter.split_documents(docs)
+                status.update("[cyan]Creating vector store...")
+                if self.vector_store is None:
+                    self.vector_store = Chroma.from_documents(
+                        documents=split_docs,
+                        embedding=self.embeddings,
+                        persist_directory=self.persist_directory,
+                        collection_name=self.collection_name
+                    )
+                else:
+                    self.vector_store.add_documents(split_docs)
+                console.print(f"[green]Successfully processed {len(split_docs)} document chunks[/green]")
         except Exception as e:
             console.print(f"[red]Error creating vector store: {e!s}[/red]")
             raise
@@ -196,6 +288,88 @@ class KnowledgeBase:
         except Exception as e:
             console.print(f"[red]Error during retrieval: {e!s}[/red]")
             return []
+            
+    @classmethod
+    def list_available_collections(cls) -> list[str]:
+        """List all available knowledge base collections."""
+        base_dir = os.path.join(os.getcwd(), "knowledge_bases")
+        if not os.path.exists(base_dir):
+            return []
+        return [d for d in os.listdir(base_dir) 
+                if os.path.isdir(os.path.join(base_dir, d))]
+                
+    def get_collection_info(self) -> dict:
+        """Get information about the current collection."""
+        if not self.vector_store:
+            return {
+                "name": self.collection_name,
+                "document_count": 0,
+                "size": "0 KB"
+            }
+        
+        try:
+            doc_count = len(self.vector_store._collection.get()["ids"])
+            size = sum(os.path.getsize(os.path.join(self.persist_directory, f)) 
+                      for f in os.listdir(self.persist_directory) if os.path.isfile(os.path.join(self.persist_directory, f)))
+            return {
+                "name": self.collection_name,
+                "document_count": doc_count,
+                "size": f"{size / 1024:.2f} KB"
+            }
+        except Exception as e:
+            console.print(f"[red]Error getting collection info: {e}[/red]")
+            return {
+                "name": self.collection_name,
+                "document_count": "Unknown",
+                "size": "Unknown"
+            }
+
+    def benchmark_retrieval(self, test_queries: list[str], relevant_docs: list[list[str]], k: int = 4) -> dict:
+        """Benchmark retrieval performance.
+        
+        Args:
+            test_queries: List of test queries
+            relevant_docs: List of lists containing relevant document IDs for each query
+            k: Number of documents to retrieve
+            
+        Returns:
+            Dictionary containing performance metrics
+        """
+        if not self.vector_store:
+            raise ValueError("No documents ingested yet!")
+            
+        metrics = {
+            "precision_at_k": [],
+            "recall_at_k": [],
+            "retrieval_time": []
+        }
+        
+        for query, relevant in zip(test_queries, relevant_docs):
+            start_time = time.time()
+            retrieved = self.vector_store.similarity_search(query, k=k)
+            retrieval_time = time.time() - start_time
+            
+            retrieved_ids = [str(doc.metadata.get("source", "")) for doc in retrieved]
+            relevant_set = set(relevant)
+            retrieved_set = set(retrieved_ids)
+            
+            # Calculate metrics
+            true_positives = len(relevant_set.intersection(retrieved_set))
+            precision = true_positives / k if k > 0 else 0
+            recall = true_positives / len(relevant_set) if relevant_set else 0
+            
+            metrics["precision_at_k"].append(precision)
+            metrics["recall_at_k"].append(recall)
+            metrics["retrieval_time"].append(retrieval_time)
+        
+        # Calculate averages
+        return {
+            "avg_precision_at_k": sum(metrics["precision_at_k"]) / len(test_queries),
+            "avg_recall_at_k": sum(metrics["recall_at_k"]) / len(test_queries),
+            "avg_retrieval_time": sum(metrics["retrieval_time"]) / len(test_queries),
+            "model_name": self.config.embedding_model,
+            "embedding_dimensions": self.config.embedding_dimensions
+        }
 
 
 class Agent:
@@ -309,9 +483,9 @@ class AgentOrchestrator:
 
 
 class ReflectiveRAG:
-    def __init__(self, config: RAGConfig):
+    def __init__(self, config: RAGConfig, collection_name: str = "default"):
         self.config = config
-        self.knowledge_base = KnowledgeBase(config)
+        self.knowledge_base = KnowledgeBase(config, collection_name)
         self.query_processor = QueryProcessor()
         self.reflective_layer = ReflectiveLayer(config)
         self.orchestrator = AgentOrchestrator(config)
@@ -322,20 +496,35 @@ class ReflectiveRAG:
         self.knowledge_base.ingest_documents(contexts)
 
     def answer_query(self, query: str) -> str:
-        query_info = self.query_processor.understand_query(query)
-        sub_queries = self.query_processor.decompose_query(query_info)
-        
-        # Process each sub-query and combine results
-        responses = []
-        for sub_query in sub_queries:
-            response = self.orchestrator.coordinate(
-                query=sub_query,
-                knowledge_base=self.knowledge_base,  # Pass the shared knowledge base
-                reflective_layer=self.reflective_layer,
-            )
-            responses.append(response)
-        
-        # If we have multiple responses, combine them
-        if len(responses) > 1:
-            return "\n\n".join([f"Sub-query {i+1}:\n{resp}" for i, resp in enumerate(responses)])
-        return responses[0]
+        with console.status("[cyan]Processing query...") as status:
+            status.update("[cyan]Understanding query intent...")
+            query_info = self.query_processor.understand_query(query)
+            console.print(f"[green]Detected query intent: {query_info['intent']} (confidence: {query_info['confidence']:.2f})[/green]")
+            
+            status.update("[cyan]Decomposing query...")
+            sub_queries = self.query_processor.decompose_query(query_info)
+            if len(sub_queries) > 1:
+                console.print(f"[green]Query decomposed into {len(sub_queries)} sub-queries[/green]")
+            
+            # Process each sub-query and combine results
+            responses = []
+            for i, sub_query in enumerate(sub_queries, 1):
+                if len(sub_queries) > 1:
+                    status.update(f"[cyan]Processing sub-query {i}/{len(sub_queries)}...")
+                    console.print(f"\n[blue]Sub-query {i}:[/blue] {sub_query}")
+                
+                response = self.orchestrator.coordinate(
+                    query=sub_query,
+                    knowledge_base=self.knowledge_base,
+                    reflective_layer=self.reflective_layer,
+                )
+                responses.append(response)
+            
+            # If we have multiple responses, combine them
+            if len(responses) > 1:
+                final_response = "\n\n".join([f"Sub-query {i+1}:\n{resp}" for i, resp in enumerate(responses)])
+            else:
+                final_response = responses[0]
+            
+            console.print("[green]Query processing complete[/green]")
+            return final_response

@@ -1,0 +1,12 @@
+---
+description: Main project files
+globs: src/agentic_rag/*.py, tests/*.py, *.md
+---
+
+# Your rule content
+
+- [cli.py](mdc:src/agentic_rag/cli.py) is for the cli 
+- [rag_system.py](mdc:src/agentic_rag/rag_system.py) is for the Agentic RAG system the we are building
+- When making substantial changes to the [rag_system.py](mdc:src/agentic_rag/rag_system.py) or [cli.py](mdc:src/agentic_rag/cli.py) we should update the tests [test_rag_system.py](mdc:tests/test_rag_system.py) or [test_cli.py](mdc:tests/test_cli.py)
+- When making substantial changes to the [rag_system.py](mdc:src/agentic_rag/rag_system.py) or [cli.py](mdc:src/agentic_rag/cli.py) we should update the [README.md](mdc:README.md) to reflect the changes and keep it updated.
+- We are working on a Macbook Pro M3 MAX 64GB shared memory and should take advantage of mps when posible, but at the same time the Agentic RAG system should work on multiple platforms.  
