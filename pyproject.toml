@@ -14,6 +14,7 @@ dependencies = [
   "typer",
   "rich",
   "questionary",
+  "termcolor",
   "langchain",
   "langchain-community",
   "langchain-huggingface",
@@ -33,6 +34,7 @@ dependencies = [
   "ruff",
   "pypdf",
   "psutil",
+  "marker-pdf",
 ]
 
 [project.optional-dependencies]
@@ -63,3 +65,11 @@ select = ["E", "F", "B", "I", "N", "UP", "PL", "RUF"]
 [tool.black]
 line-length = 120
 target-version = ["py311"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

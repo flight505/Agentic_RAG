@@ -1,17 +1,18 @@
 import os
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from chromadb import Settings as ChromaSettings
+from langchain.schema import Document
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
 # Initialize console for rich output
@@ -44,73 +45,83 @@ except ImportError:
 # Add constants at the top of the file after imports
 PERFORMANCE_THRESHOLD = 0.8  # Threshold for strategy adjustment
 
-@dataclass
-class RAGConfig:
-    llm_api_key: str  # Your LLM API key
-    llm_api_base_url: str  # Your LLM API base URL
-    llm_api_version: str = "2024-01-01"  # API version if required
-    llm_deployment_name: str = None  # For Azure deployment
+class RAGConfig(BaseModel):
+    """Configuration for the RAG system."""
+    model_config = ConfigDict(validate_default=True)  # Validate defaults but allow modifications
+    
+    llm_api_key: str = Field(description="Your LLM API key")
+    llm_api_base_url: str = Field(description="Your LLM API base URL")
+    llm_api_version: str = Field(default="2025-02-01", description="API version if required")
+    llm_deployment_name: str | None = Field(default=None, description="For Azure deployment")
 
     # Embedding Configuration
-    embedding_provider: str = "openai"  # 'openai' or 'local'
-    openai_embedding_model: str = "text-embedding-3-large"  # OpenAI's best model
-    openai_dimensions: int = 3072  # Can be reduced for performance/cost tradeoff
-    local_embedding_model: str = "sentence-transformers/all-mpnet-base-v2"  # Fallback local model
-    local_dimensions: int = 768  # Local model dimensions
+    embedding_provider: str = Field(
+        default="openai",
+        description="'openai' or 'local'",
+        pattern="^(openai|local)$"
+    )
+    openai_embedding_model: str = Field(
+        default="text-embedding-3-large",
+        description="OpenAI's best model"
+    )
+    openai_dimensions: int = Field(
+        default=3072,
+        description="Can be reduced for performance/cost tradeoff"
+    )
+    local_embedding_model: str = Field(
+        default="sentence-transformers/all-mpnet-base-v2",
+        description="Fallback local model"
+    )
+    local_dimensions: int = Field(
+        default=768,
+        description="Local model dimensions"
+    )
 
     # RAG Configuration
-    chunk_size: int = 500
-    chunk_overlap: int = 50
-    k_retrieval: int = 4
+    chunk_size: int = Field(default=500, gt=0, description="Size of text chunks")
+    chunk_overlap: int = Field(default=50, ge=0, description="Overlap between chunks")
+    k_retrieval: int = Field(default=4, gt=0, description="Number of documents to retrieve")
 
-    def __post_init__(self):
-        if not self.llm_api_key or not self.llm_api_base_url:
-            raise ValueError("LLM API key and base URL are required")
-        
-        if self.embedding_provider not in ["openai", "local"]:
-            raise ValueError("embedding_provider must be either 'openai' or 'local'")
+    @property
+    def is_valid(self) -> bool:
+        """Check if the configuration is valid."""
+        return bool(self.llm_api_key and self.llm_api_base_url and 
+                   self.embedding_provider in ["openai", "local"])
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate configuration after initialization."""
+        if not self.is_valid:
+            raise ValueError("Invalid configuration: API key, base URL required and valid embedding provider")
 
 
 class DeepseekQuery:
-    def __init__(self, config: RAGConfig):
+    def __init__(self, config: RAGConfig, client: OpenAI | None = None):
         self.config = config
         self.headers = {"Content-Type": "application/json", "Authorization": f"Bearer {config.llm_api_key}"}
         self.kluster_key = os.getenv("KLUSTER_API_KEY")
         self.use_kluster = bool(self.kluster_key)
+        self._client = client
 
     def get_deepseek_response(self, system_content: str, user_content: str) -> str:
         """Get response from DeepSeek or Kluster AI with proper fallback."""
         try:
-            if self.use_kluster:
+            client = self._client
+            if not client:
                 client = OpenAI(
-                    api_key=self.kluster_key,
-                    base_url="https://api.kluster.ai/v1"
+                    api_key=self.kluster_key if self.use_kluster else self.config.llm_api_key,
+                    base_url="https://api.kluster.ai/v1" if self.use_kluster else self.config.llm_api_base_url
                 )
-                response = client.chat.completions.create(
-                    model="deepseek-ai/DeepSeek-R1",  # Using Kluster's DeepSeek-R1
-                    messages=[
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": user_content},
-                    ],
-                    max_tokens=1024,
-                    temperature=0.7,
-                    stream=False,
-                )
-            else:
-                client = OpenAI(
-                    api_key=self.config.llm_api_key,
-                    base_url=self.config.llm_api_base_url
-                )
-                response = client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": user_content},
-                    ],
-                    max_tokens=1024,
-                    temperature=0.7,
-                    stream=False,
-                )
+            
+            response = client.chat.completions.create(
+                model="deepseek-ai/DeepSeek-R1" if self.use_kluster else "deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=1024,
+                temperature=0.7,
+                stream=False,
+            )
             
             if response and response.choices:
                 return response.choices[0].message.content
@@ -179,7 +190,7 @@ class KnowledgeBase:
                     self.embeddings = OpenAIEmbeddings(
                         model=config.openai_embedding_model,
                         dimensions=config.openai_dimensions,
-                        client=OpenAI()  # Use default client configuration
+                        client=OpenAI()
                     )
                     console.print(
                         f"[green]Successfully initialized OpenAI embeddings: "
@@ -218,7 +229,8 @@ class KnowledgeBase:
 
         self.vector_store = None
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap
+            chunk_size=config.chunk_size,
+            chunk_overlap=config.chunk_overlap
         )
         
         # Create persist directory with proper permissions
@@ -244,31 +256,118 @@ class KnowledgeBase:
         except Exception as e:
             console.print(f"[yellow]Could not load existing knowledge base: {e}[/yellow]")
 
+    def convert_pdf_to_text(self, pdf_path: str) -> str:
+        """Convert a PDF file to text using the Marker library.
+        
+        Args:
+            pdf_path: Path to the PDF file.
+            
+        Returns:
+            Extracted text from the PDF.
+            
+        Raises:
+            Exception: If conversion fails or produces empty text.
+        """
+        try:
+            import logging
+
+            from marker.config.parser import ConfigParser
+            from marker.converters.pdf import PdfConverter
+            from marker.models import create_model_dict
+
+            # Configure handler to capture progress
+            class RichProgressHandler(logging.Handler):
+                def __init__(self, console):
+                    super().__init__()
+                    self.console = console
+                    
+                def emit(self, record):
+                    msg = record.getMessage()
+                    
+                    # Handle model loading messages
+                    if "Loaded" in msg and "model" in msg:
+                        self.console.print(msg, style="green")
+                        return
+                    
+                    # Handle progress messages
+                    for step in ['layout', 'texify', 'equations', 'tables']:
+                        if step in msg.lower():
+                            self.console.print(f"Processing {step}... {msg}", style="cyan")
+
+            # Set up logging with our custom handler
+            handler = RichProgressHandler(console)
+            logger = logging.getLogger('marker')
+            logger.setLevel(logging.INFO)
+            logger.addHandler(handler)
+
+            config = {
+                "output_format": "markdown",
+                "use_llm": False,
+                "force_ocr": False,
+            }
+            
+            config_parser = ConfigParser(config)
+            converter = PdfConverter(
+                config=config_parser.generate_config_dict(),
+                artifact_dict=create_model_dict(),
+            )
+            
+            # Run conversion with status updates through logging
+            with console.status(f"[cyan]Converting {Path(pdf_path).name}...", spinner="dots") as status:
+                text = converter(pdf_path).markdown
+                
+                if not text or len(text.strip()) == 0:
+                    raise ValueError("Conversion produced empty text")
+            
+            # Clean up logging handler
+            logger.removeHandler(handler)
+            return text
+            
+        except Exception as e:
+            raise Exception(f"Error converting PDF '{Path(pdf_path).name}': {e!s}") from e
+
     def ingest_pdf(self, pdf_path: str) -> None:
-        """Ingest a single PDF file into the knowledge base."""
+        """Ingest a PDF file into the knowledge base.
+        
+        Args:
+            pdf_path: Path to the PDF file.
+            
+        Raises:
+            ValueError: If embeddings are not available.
+            Exception: If PDF processing fails.
+        """
         if not self.embeddings:
             raise ValueError("Embeddings not available. Cannot ingest PDF.")
         
         try:
-            loader = PyPDFLoader(pdf_path)
-            docs = loader.load()
-            split_docs = self.text_splitter.split_documents(docs)
+            # Convert PDF to text first
+            text = self.convert_pdf_to_text(pdf_path)
             
+            # Create a Document and split into chunks
+            doc = Document(
+                page_content=text,
+                metadata={
+                    "source": pdf_path,
+                    "filename": Path(pdf_path).name,
+                    "collection": self.collection_name
+                }
+            )
+            
+            split_docs = self.text_splitter.split_documents([doc])
+            
+            # Initialize or update vector store
             if self.vector_store is None:
                 self.vector_store = Chroma.from_documents(
                     documents=split_docs,
                     embedding=self.embeddings,
-                    persist_directory=self.persist_directory,
                     collection_name=self.collection_name,
                     client_settings=self.chroma_settings
                 )
             else:
                 self.vector_store.add_documents(split_docs)
             
-            console.print(f"[green]Successfully processed and persisted PDF: {pdf_path}[/green]")
         except Exception as e:
-            console.print(f"[red]Error processing PDF {pdf_path}: {e!s}[/red]")
-            raise
+            raise Exception(f"Error processing PDF {Path(pdf_path).name}: {e!s}") from e
 
     def ingest_documents(self, documents: list[str], source_type: str = "text"):
         if not self.embeddings:
@@ -308,7 +407,6 @@ class KnowledgeBase:
                     self.vector_store = Chroma.from_documents(
                         documents=split_docs,
                         embedding=self.embeddings,
-                        persist_directory=self.persist_directory,
                         collection_name=self.collection_name,
                         client_settings=self.chroma_settings
                     )
@@ -400,8 +498,8 @@ class KnowledgeBase:
             "avg_precision_at_k": sum(metrics["precision_at_k"]) / len(test_queries),
             "avg_recall_at_k": sum(metrics["recall_at_k"]) / len(test_queries),
             "avg_retrieval_time": sum(metrics["retrieval_time"]) / len(test_queries),
-            "model_name": self.config.embedding_model,
-            "embedding_dimensions": self.config.embedding_dimensions
+            "model_name": self.config.local_embedding_model,
+            "embedding_dimensions": self.config.local_dimensions
         }
 
     def reset_vector_store(self) -> None:
@@ -409,7 +507,7 @@ class KnowledgeBase:
         if self.vector_store:
             try:
                 self.vector_store._client.reset()
-                console.print(f"[green]Vector store reset successfully.[/green]")
+                console.print("[green]Vector store reset successfully.[/green]")
             except Exception as e:
                 console.print(f"[red]Error resetting vector store: {e!s}[/red]")
             self.vector_store = None

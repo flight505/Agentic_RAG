@@ -13,6 +13,9 @@ import pytest
 # Vector store and embedding imports
 from chromadb import Settings as ChromaSettings
 from rich.console import Console
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.style import Style
 from rich.table import Table
 
 # Local imports
@@ -38,7 +41,7 @@ TEST_QUERIES = [
 OPENAI_EMBEDDING_DIMENSIONS = 3072
 LOCAL_EMBEDDING_DIMENSIONS = 768
 MAX_AGENT_INTERACTIONS = 3
-MAX_INGESTION_TIME = 10.0  # seconds
+MAX_INGESTION_TIME = 15.0  # seconds - increased to account for Marker PDF processing
 MAX_MEMORY_IMPACT = 500  # MB
 
 # Initialize non-interactive console for testing
@@ -91,18 +94,18 @@ def mock_openai_client():
         # Create mock embeddings response
         mock_embedding_object = MagicMock()
         mock_embedding_object.embedding = [0.1] * 3072  # Match the dimension of text-embedding-3-large
-        
+
         mock_embeddings_response = MagicMock()
         mock_embeddings_response.data = [mock_embedding_object]
-        
+
         # Create mock embeddings client
         mock_embeddings = MagicMock()
         mock_embeddings.create = MagicMock(return_value=mock_embeddings_response)
-        
+
         # Set up the OpenAI client structure
         mock_client = MagicMock()
         mock_client.embeddings = mock_embeddings
-        
+
         mock_client.create = mock_embeddings.create
         mock_openai.return_value = mock_client
         yield mock_client
@@ -129,35 +132,37 @@ def mock_embeddings():
                     "model": "text-embedding-3-large",
                     "dimensions": OPENAI_EMBEDDING_DIMENSIONS,
                 }
-                
+
                 # Create a mock client
                 mock_client = MagicMock()
                 mock_client.embeddings = MagicMock()
-                mock_client.embeddings.create = MagicMock(return_value={
-                    "data": [{"embedding": [0.1] * self.dimensions}],
-                    "model": self.model,
-                    "usage": {"prompt_tokens": 100, "total_tokens": 100}
-                })
+                mock_client.embeddings.create = MagicMock(
+                    return_value={
+                        "data": [{"embedding": [0.1] * self.dimensions}],
+                        "model": self.model,
+                        "usage": {"prompt_tokens": 100, "total_tokens": 100},
+                    }
+                )
                 self.client = mock_client
-            
+
             def embed_documents(self, texts):
                 return [[0.1] * self.dimensions for _ in texts]
-            
+
             def embed_query(self, text):
                 return [0.1] * self.dimensions
-            
+
             def _get_len_safe_embeddings(self, texts, engine=None, chunk_size=None):
                 return [[0.1] * self.dimensions for _ in texts]
-            
+
             def _embedding_with_retry(self, texts):
                 if not isinstance(texts, list):
                     texts = [texts]
                 return {
                     "data": [{"embedding": [0.1] * self.dimensions} for _ in texts],
                     "model": self.model,
-                    "usage": {"prompt_tokens": len(texts) * 100, "total_tokens": len(texts) * 100}
+                    "usage": {"prompt_tokens": len(texts) * 100, "total_tokens": len(texts) * 100},
                 }
-            
+
             def _tokenize(self, texts, chunk_size=None):
                 if not isinstance(texts, list):
                     texts = [texts]
@@ -178,11 +183,7 @@ def mock_progress():
 @pytest.fixture
 def test_config():
     """Create a test configuration."""
-    return RAGConfig(
-        llm_api_key="dummy-key",
-        llm_api_base_url="https://api.kluster.ai/v1",
-        embedding_provider="openai"
-    )
+    return RAGConfig(llm_api_key="dummy-key", llm_api_base_url="https://api.kluster.ai/v1", embedding_provider="openai")
 
 
 @pytest.fixture(autouse=True)
@@ -201,7 +202,7 @@ def chroma_settings():
         is_persistent=False,
         anonymized_telemetry=False,
         allow_reset=True,  # Important for tests
-        persist_directory=":memory:"  # Use in-memory storage for tests
+        persist_directory=":memory:",  # Use in-memory storage for tests
     )
 
 
@@ -284,29 +285,30 @@ class TestKnowledgeBase:
 class TestQueryProcessing:
     """Tests for query processing and RAG functionality."""
 
-    @pytest.mark.asyncio
-    async def test_query_workflow(self, mocker, rag_system, sample_pdf):
+    def test_query_workflow(self, mocker, rag_system, pdf_dir):
         """Test the complete query processing workflow."""
-        rag_system.knowledge_base.ingest_pdf(str(sample_pdf))
+        test_pdf = next(pdf_dir.glob("*.pdf"))
+        rag_system.knowledge_base.ingest_pdf(str(test_pdf))
 
-        with (
-            mocker.patch("agentic_rag.rag_system.ReasoningAgent") as mock_reason,
-            mocker.patch("agentic_rag.rag_system.ResponseAgent") as mock_response,
-            mocker.patch.object(rag_system.reflective_layer, "evaluate_response") as mock_evaluate,
-        ):
-            # Setup mock agents
-            mock_reason_instance = mocker.MagicMock()
-            mock_reason_instance.analyze.return_value = "Test analysis"
-            mock_reason.return_value = mock_reason_instance
+        # Setup mock agents
+        # Create mock agents
+        mock_search = mocker.MagicMock()
+        mock_reason = mocker.MagicMock()
+        mock_reason.analyze.return_value = "Test analysis"
+        mock_response = mocker.MagicMock()
+        mock_response.generate.return_value = MOCK_RESPONSE
 
-            mock_response_instance = mocker.MagicMock()
-            mock_response_instance.generate.return_value = MOCK_RESPONSE
-            mock_response.return_value = mock_response_instance
+        # Patch the agents dictionary
+        mocker.patch.object(
+            rag_system.orchestrator, "agents", {"search": mock_search, "reason": mock_reason, "response": mock_response}
+        )
 
-            mock_evaluate.return_value = 0.9
+        # Patch evaluate_response
+        mocker.patch.object(rag_system.reflective_layer, "evaluate_response", return_value=0.9)
 
-            response = await rag_system.answer_query("test query")
-            assert MOCK_RESPONSE in response
+        # Run the test
+        response = rag_system.answer_query("test query")
+        assert MOCK_RESPONSE in response
 
     def test_reflective_layer(self, test_config):
         """Test reflective layer evaluation and strategy adjustment."""
@@ -327,13 +329,145 @@ class TestQueryProcessing:
 class TestModelIntegration:
     """Tests for model integration and vector store performance."""
 
-    @pytest.mark.skip(reason="Deepseek API is down, using Kluster AI provider; test skipped")
+    # Deepseek API is down, using Kluster AI provider
     def test_deepseek_integration(self, mock_openai_client, test_config):
         """Test DeepSeek and Kluster AI integration."""
-        client = DeepseekQuery(test_config)
-        # The direct deepseek API is not working, so this test is skipped.
+        # Setup mock response
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock(message=MagicMock(content=MOCK_RESPONSE))]
+        mock_openai_client.chat.completions.create.return_value = mock_completion
+
+        # Test with Kluster AI
+        test_config.llm_api_base_url = "https://api.kluster.ai/v1"
+        client = DeepseekQuery(test_config, client=mock_openai_client)
+        client.kluster_key = "dummy-kluster-key"
+        client.use_kluster = True
+
         response = client.get_deepseek_response("test system", "test user")
         assert response == MOCK_RESPONSE
+        mock_openai_client.chat.completions.create.assert_called_with(
+            model="deepseek-ai/DeepSeek-R1",
+            messages=[
+                {"role": "system", "content": "test system"},
+                {"role": "user", "content": "test user"},
+            ],
+            max_tokens=1024,
+            temperature=0.7,
+            stream=False,
+        )
+
+        # Test DeepSeek path
+        mock_openai_client.chat.completions.create.reset_mock()
+        client.use_kluster = False
+        response = client.get_deepseek_response("test system", "test user")
+        assert response == MOCK_RESPONSE
+        mock_openai_client.chat.completions.create.assert_called_with(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "test system"},
+                {"role": "user", "content": "test user"},
+            ],
+            max_tokens=1024,
+            temperature=0.7,
+            stream=False,
+        )
+
+    def test_embedding_performance(self, test_config, chroma_settings, pdf_dir):
+        """Compare performance of different embedding models."""
+        # Create layout for rich output
+        layout = Layout()
+        layout.split_column(
+            Layout(Panel.fit("Embedding Models Performance Comparison", style="bold magenta"), size=3),
+            Layout(name="main"),
+        )
+
+        # Test configuration for local model
+        test_config.embedding_provider = "local"
+        test_config.local_embedding_model = "sentence-transformers/all-mpnet-base-v2"
+        test_config.local_dimensions = 768
+
+        # Initialize knowledge base with local model
+        kb_local = KnowledgeBase(test_config, "test_performance_local")
+        kb_local.chroma_settings = chroma_settings
+
+        # Test configuration for OpenAI model
+        test_config.embedding_provider = "openai"
+        test_config.openai_embedding_model = "text-embedding-3-large"
+        test_config.openai_dimensions = 3072
+        kb_openai = KnowledgeBase(test_config, "test_performance_openai")
+        kb_openai.chroma_settings = chroma_settings
+
+        # Performance metrics tables
+        local_metrics_table = Table(title="Local Model (all-mpnet-base-v2)", show_header=True)
+        openai_metrics_table = Table(title="OpenAI Model (text-embedding-3-large)", show_header=True)
+
+        for table in [local_metrics_table, openai_metrics_table]:
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", justify="right")
+
+        try:
+            # Benchmark both configurations
+            test_pdf = next(pdf_dir.glob("*.pdf"))
+
+            # Test local model
+            console.print(Panel("Testing local model...", style="blue"))
+            kb_local.ingest_pdf(str(test_pdf))
+            metrics_local = kb_local.benchmark_retrieval(TEST_QUERIES, [[str(test_pdf)] * 4] * len(TEST_QUERIES), k=4)
+
+            # Test OpenAI model
+            console.print(Panel("Testing OpenAI model...", style="blue"))
+            kb_openai.ingest_pdf(str(test_pdf))
+            metrics_openai = kb_openai.benchmark_retrieval(TEST_QUERIES, [[str(test_pdf)] * 4] * len(TEST_QUERIES), k=4)
+
+            # Populate metrics tables
+            for metric, value in metrics_local.items():
+                if isinstance(value, float):
+                    local_metrics_table.add_row(metric.replace("_", " ").title(), f"{value:.3f}")
+
+            for metric, value in metrics_openai.items():
+                if isinstance(value, float):
+                    openai_metrics_table.add_row(metric.replace("_", " ").title(), f"{value:.3f}")
+
+            # Display results
+            console.print("\n")
+            layout["main"].split_row(Layout(local_metrics_table, ratio=1), Layout(openai_metrics_table, ratio=1))
+            console.print(layout)
+
+            # Performance assertions
+            assert metrics_openai["avg_precision_at_k"] >= metrics_local["avg_precision_at_k"], (
+                "OpenAI model should have better or equal precision"
+            )
+            assert metrics_openai["avg_recall_at_k"] >= metrics_local["avg_recall_at_k"], (
+                "OpenAI model should have better or equal recall"
+            )
+            # Allow up to 5x slower for OpenAI model due to API latency
+            assert metrics_openai["avg_retrieval_time"] < metrics_local["avg_retrieval_time"] * 5.0, (
+                "OpenAI model is unexpectedly slow"
+            )
+
+            # Display improvement percentages
+            improvements = Panel(
+                f"""
+                Precision Improvement: {((metrics_openai["avg_precision_at_k"] / metrics_local["avg_precision_at_k"]) - 1) * 100:.1f}%
+                Recall Improvement: {((metrics_openai["avg_recall_at_k"] / metrics_local["avg_recall_at_k"]) - 1) * 100:.1f}%
+                Speed Impact: {((metrics_openai["avg_retrieval_time"] / metrics_local["avg_retrieval_time"]) - 1) * 100:.1f}%
+                """,
+                title="Performance Improvements",
+                style="green",
+            )
+            console.print(improvements)
+
+        except Exception as e:
+            console.print("[red]Error during embedding performance test[/red]")
+            raise e
+        finally:
+            # Ensure cleanup happens even if test fails
+            for kb in (kb_local, kb_openai):
+                try:
+                    if kb and kb.vector_store:
+                        kb.reset_vector_store()
+                except Exception as cleanup_error:
+                    console.print(f"[red]Failed to cleanup vector store: {cleanup_error}[/red]")
 
     def test_vector_store_performance(self, test_config, chroma_settings, pdf_dir):
         """Test Chroma vector store performance and optimizations."""
@@ -368,8 +502,7 @@ class TestModelIntegration:
             # Test batch query performance (recommended for production)
             start_time = time.time()
             kb.vector_store.similarity_search_by_vector(
-                [kb.embeddings.embed_query(q) for q in TEST_QUERIES],
-                k=test_config.k_retrieval
+                [kb.embeddings.embed_query(q) for q in TEST_QUERIES], k=test_config.k_retrieval
             )
             performance_metrics["batch_query_time"] = time.time() - start_time
 
@@ -411,7 +544,9 @@ class TestModelIntegration:
 @pytest.fixture(autouse=True)
 def patch_get_len_safe_embeddings():
     from langchain_openai import OpenAIEmbeddings
+
     def fake_get_len_safe_embeddings(self, texts, *, engine=None, chunk_size=None):
         return [[0.1] * self.dimensions for _ in texts]
+
     with patch.object(OpenAIEmbeddings, "_get_len_safe_embeddings", new=fake_get_len_safe_embeddings):
         yield

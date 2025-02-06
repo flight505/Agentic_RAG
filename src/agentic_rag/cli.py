@@ -8,11 +8,16 @@ import typer
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.status import Status
+from rich.panel import Panel
 
 # Import our RAG system with correct package path
-from agentic_rag.rag_system import KnowledgeBase, RAGConfig, ReflectiveRAG
+from agentic_rag.rag_system import KnowledgeBase, RAGConfig, ReflectiveRAG, DEVICE
 
-app = typer.Typer()
+app = typer.Typer(
+    name="agentic-rag",
+    help="Agentic RAG System - Intelligent document processing and querying",
+    add_completion=False
+)
 console = Console()
 
 # Global state to track loaded PDFs and RAG system instance
@@ -25,6 +30,7 @@ class RAGSingleton:
 
     _instances: ClassVar[dict[str, ReflectiveRAG]] = {}
     _current_collection: ClassVar[str] = "default"
+    _initialized: ClassVar[set[str]] = set()  # Track which collections have been initialized
 
     @classmethod
     def get_instance(cls, collection_name: str | None = None) -> ReflectiveRAG:
@@ -33,9 +39,7 @@ class RAGSingleton:
             collection_name = cls._current_collection
 
         if collection_name not in cls._instances:
-            with Status(
-                f"[bold blue]Initializing RAG system for collection '{collection_name}'...", spinner="dots"
-            ) as status:
+            with Status(f"[bold blue]Initializing collection '{collection_name}'...", spinner="dots") as status:
                 # Try Kluster AI first, fallback to Deepseek
                 kluster_key = os.getenv("KLUSTER_API_KEY")
                 deepseek_key = os.getenv("DEEPSEEK_API_KEY")
@@ -54,14 +58,18 @@ class RAGSingleton:
                     console.print("[red]Error: No API key found for either Kluster AI or Deepseek[/red]")
                     raise typer.Exit(1)
                 
-                status.update("[bold blue]Loading models and embeddings...")
                 cls._instances[collection_name] = ReflectiveRAG(config, collection_name)
+                cls._initialized.add(collection_name)
+                console.print(Panel(f"Collection '{collection_name}' initialized successfully", style="green"))
+        
         return cls._instances[collection_name]
 
     @classmethod
     def set_current_collection(cls, collection_name: str) -> None:
         """Set the current active collection."""
         cls._current_collection = collection_name
+        # Initialize the collection if needed
+        cls.get_instance(collection_name)
 
 
 def get_rag_system(collection_name: str | None = None) -> ReflectiveRAG:
@@ -75,37 +83,48 @@ def load_pdf_with_progress(pdf_path: str, progress: Progress) -> None:
 
     # Check if PDF is already loaded
     if pdf_path in _loaded_pdfs:
-        console.print(f"[yellow]PDF already loaded: {pdf_path}[/yellow]")
+        console.print(Panel(f"PDF already loaded: {Path(pdf_path).name}", style="yellow"))
         return
 
     task = progress.add_task(f"[cyan]Processing {Path(pdf_path).name}", total=100)
 
-    # Simulate progress steps for PDF processing
-    progress.update(task, advance=20, description=f"[cyan]Loading {Path(pdf_path).name}")
-    rag = get_rag_system()
-
-    progress.update(task, advance=30, description=f"[cyan]Extracting text from {Path(pdf_path).name}")
     try:
+        # Start PDF conversion and ingestion
+        progress.update(task, advance=10, description=f"[cyan]Preparing {Path(pdf_path).name}[/cyan]")
+        
+        rag = get_rag_system()
+        
+        # The actual conversion progress will be shown through our Rich display
         rag.knowledge_base.ingest_pdf(pdf_path)
-        progress.update(task, advance=50, description=f"[cyan]Finalizing {Path(pdf_path).name}")
-        time.sleep(0.5)  # Give user time to see completion
+        
+        # Update progress after conversion is complete
         progress.update(task, completed=100)
-        console.print(f"[green]Successfully loaded {pdf_path}[/green]")
+        
+        console.print(Panel(
+            f"Successfully loaded: {Path(pdf_path).name}\n"
+            f"Collection: {RAGSingleton._current_collection}",
+            style="green",
+            title="Success"
+        ))
         _loaded_pdfs.add(pdf_path)
+        
     except Exception as e:
         progress.update(task, description=f"[red]Error processing {Path(pdf_path).name}")
-        console.print(f"[red]Error loading PDF: {e!s}[/red]")
+        console.print(Panel(f"Error loading PDF: {str(e)}", style="red", title="Error"))
         raise typer.Exit(1) from e
 
 
 def show_loaded_pdfs():
     """Display currently loaded PDFs."""
     if not _loaded_pdfs:
-        console.print("[yellow]No PDFs currently loaded[/yellow]")
+        console.print(Panel("No PDFs currently loaded", style="yellow"))
     else:
-        console.print("[blue]Currently loaded PDFs:[/blue]")
-        for pdf in _loaded_pdfs:
-            console.print(f"  - {Path(pdf).name}")
+        pdfs = "\n".join([f"• {Path(pdf).name}" for pdf in sorted(_loaded_pdfs)])
+        console.print(Panel(
+            f"Collection: {RAGSingleton._current_collection}\n\n{pdfs}",
+            title="Loaded PDFs",
+            style="blue"
+        ))
 
 
 def handle_single_pdf() -> bool:
@@ -163,70 +182,139 @@ def handle_multiple_pdfs() -> bool:
 
 def handle_pdf_loading() -> bool:
     """Handle PDF loading operation. Returns True if operation should continue."""
-    actions = {
-        "Load Single PDF": handle_single_pdf,
-        "Load Multiple PDFs": handle_multiple_pdfs,
-        "View Loaded PDFs": lambda: (show_loaded_pdfs(), True)[1],
-        "Back to Main Menu": lambda: True,
-        "Exit": lambda: False,
-    }
+    actions = [
+        "Load Single PDF",
+        "Load Multiple PDFs",
+        "View Loaded PDFs",
+        questionary.Separator(),
+        "← Back",
+    ]
 
     while True:
-        action = questionary.select("PDF Loading Menu:", choices=list(actions.keys())).ask()
+        console.print(f"\n[bold cyan]Current Collection: {RAGSingleton._current_collection}[/bold cyan]")
+        action = questionary.select("PDF Loading Menu:", choices=actions).ask()
 
-        if action == "Exit":
-            console.print("[yellow]Exiting system...[/yellow]")
-            raise typer.Exit()
+        if action == "← Back":
+            return True
+        elif action == "Load Single PDF":
+            pdf_path = questionary.text(
+                "Enter the path to your PDF file:",
+                validate=lambda text: Path(text).exists() or "File not found"
+            ).ask()
+            try:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    TimeRemainingColumn(),
+                ) as progress:
+                    load_pdf_with_progress(pdf_path, progress)
+            except Exception:
+                if not questionary.select(
+                    "Error loading PDF. What would you like to do?",
+                    choices=["Try Again", "← Back"]
+                ).ask() == "Try Again":
+                    continue
 
-        result = actions[action]()
-        if action != "View Loaded PDFs" and not result:
-            return False
+        elif action == "Load Multiple PDFs":
+            pdf_dir = questionary.text(
+                "Enter the directory containing PDFs:",
+                validate=lambda text: Path(text).is_dir() or "Directory not found"
+            ).ask()
+            try:
+                pdf_files = list(Path(pdf_dir).glob("*.pdf"))
+                if not pdf_files:
+                    console.print("[yellow]No PDF files found in directory[/yellow]")
+                    continue
+
+                # Filter out already loaded PDFs
+                new_pdfs = [pdf for pdf in pdf_files if str(pdf.resolve()) not in _loaded_pdfs]
+                if not new_pdfs:
+                    console.print("[yellow]All PDFs in this directory are already loaded[/yellow]")
+                    continue
+
+                selected_files = questionary.checkbox(
+                    "Select PDFs to load:",
+                    choices=[str(pdf) for pdf in new_pdfs]
+                ).ask()
+
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    TimeRemainingColumn(),
+                ) as progress:
+                    for pdf_path in selected_files:
+                        load_pdf_with_progress(pdf_path, progress)
+            except Exception:
+                if not questionary.select(
+                    "Error loading PDFs. What would you like to do?",
+                    choices=["Try Again", "← Back"]
+                ).ask() == "Try Again":
+                    continue
+
+        elif action == "View Loaded PDFs":
+            show_loaded_pdfs()
 
 
 def handle_querying() -> bool:
     """Handle querying operation. Returns True if operation should continue."""
     while True:
         action = questionary.select(
-            "Query Menu:", choices=["Ask Question", "View Previous Questions", "Back to Main Menu", "Exit"]
+            "Query Menu:",
+            choices=[
+                "Ask Question",
+                "View Previous Questions",
+                questionary.Separator(),
+                "← Back"
+            ]
         ).ask()
 
-        if action == "Exit":
-            console.print("[yellow]Exiting system...[/yellow]")
-            raise typer.Exit()
-        elif action == "Back to Main Menu":
+        if action == "← Back":
             return True
         elif action == "Ask Question":
             question = questionary.text(
-                "Enter your question:", validate=lambda text: len(text.strip()) > 0 or "Question cannot be empty"
+                "Enter your question:",
+                validate=lambda text: len(text.strip()) > 0 or "Question cannot be empty"
             ).ask()
             try:
-                with Status("[bold blue]Processing your question...", spinner="dots") as status:
+                with Status("[bold blue]Processing...", spinner="dots") as status:
                     status.update("[bold blue]Searching knowledge base...")
                     rag = get_rag_system()
                     status.update("[bold blue]Generating response...")
                     response = rag.answer_query(question)
-                    console.print(f"[green]Response:[/green] {response}")
-                if not questionary.confirm("Would you like to ask another question?").ask():
-                    return True
+                    console.print(f"\n[green]Answer:[/green] {response}")
+                
+                if questionary.select(
+                    "What would you like to do next?",
+                    choices=["Ask Another Question", "← Back"]
+                ).ask() == "← Back":
+                    continue
+                    
             except Exception as e:
-                console.print(f"[red]Error processing query: {e!s}[/red]")
-                if not questionary.confirm("Would you like to try again?").ask():
-                    return True
+                console.print(f"[red]Error: {e!s}[/red]")
+                if questionary.select(
+                    "What would you like to do?",
+                    choices=["Try Again", "← Back"]
+                ).ask() == "← Back":
+                    continue
+                    
         elif action == "View Previous Questions":
-            with Status("[bold blue]Loading question history...", spinner="dots"):
+            with Status("[bold blue]Loading history...", spinner="dots"):
                 rag = get_rag_system()
                 metrics = rag.reflective_layer.performance_metrics
                 if not metrics:
                     console.print("[yellow]No previous questions found[/yellow]")
                 else:
-                    console.print("[blue]Previous Questions:[/blue]")
+                    console.print("\n[blue]Previous Questions:[/blue]")
                     for i, metric in enumerate(metrics, 1):
-                        console.print(f"{i}. Query: {metric['query']}")
-                        console.print(f"   Relevance: {metric['relevance']:.2f}")
-                        console.print(f"   Coherence: {metric['coherence']:.2f}\n")
-
-            if not questionary.confirm("Return to Query Menu?").ask():
-                return True
+                        console.print(
+                            f"{i}. [cyan]{metric['query']}[/cyan]\n"
+                            f"   Relevance: {metric['relevance']:.2f} | "
+                            f"Coherence: {metric['coherence']:.2f}"
+                        )
 
 
 def show_collections():
@@ -236,29 +324,35 @@ def show_collections():
         console.print("[yellow]No collections available[/yellow]")
         return
 
-    console.print("[blue]Available Collections:[/blue]")
+    console.print("\n[blue]Available Collections:[/blue]")
     for collection in collections:
-        rag = get_rag_system(collection)
+        rag = RAGSingleton.get_instance(collection)
         info = rag.knowledge_base.get_collection_info()
-        console.print(f"  - {info['name']}:")
-        console.print(f"    Documents: {info['document_count']}")
-        console.print(f"    Size: {info['size']}")
-        if collection == RAGSingleton._current_collection:
-            console.print("    [green](Active)[/green]")
+        is_active = collection == RAGSingleton._current_collection
+        console.print(
+            f"{'[cyan]' if is_active else ''}{info['name']}"
+            f"{' [active]' if is_active else ''}"
+            f" ({info['document_count']} docs, {info['size']})"
+            f"{'[/cyan]' if is_active else ''}"
+        )
 
 
 def handle_collection_management() -> bool:
     """Handle collection management operations."""
     while True:
+        console.print(f"\n[bold cyan]Current Collection: {RAGSingleton._current_collection}[/bold cyan]")
         action = questionary.select(
             "Collection Management:",
-            choices=["Create New Collection", "Switch Collection", "View Collections", "Back to Main Menu", "Exit"],
+            choices=[
+                "Create New Collection",
+                "Switch Collection",
+                "View Collections",
+                questionary.Separator(),
+                "← Back",
+            ],
         ).ask()
 
-        if action == "Exit":
-            console.print("[yellow]Exiting system...[/yellow]")
-            raise typer.Exit()
-        elif action == "Back to Main Menu":
+        if action == "← Back":
             return True
         elif action == "Create New Collection":
             collection_name = questionary.text(
@@ -266,10 +360,9 @@ def handle_collection_management() -> bool:
                 validate=lambda text: bool(text.strip()) or "Collection name cannot be empty",
             ).ask()
 
-            # Initialize new collection
-            get_rag_system(collection_name)
-            RAGSingleton.set_current_collection(collection_name)
-            console.print(f"[green]Created and switched to collection: {collection_name}[/green]")
+            if collection_name:
+                RAGSingleton.set_current_collection(collection_name)
+                console.print(f"[green]Created and switched to: {collection_name}[/green]")
 
         elif action == "Switch Collection":
             collections = KnowledgeBase.list_available_collections()
@@ -277,16 +370,60 @@ def handle_collection_management() -> bool:
                 console.print("[yellow]No collections available. Create one first.[/yellow]")
                 continue
 
-            collection = questionary.select("Select collection:", choices=collections).ask()
-
+            collection = questionary.select(
+                "Select collection:",
+                choices=[*collections, questionary.Separator(), "← Back"]
+            ).ask()
+            
+            if collection == "← Back":
+                continue
+                
             RAGSingleton.set_current_collection(collection)
-            console.print(f"[green]Switched to collection: {collection}[/green]")
+            console.print(f"[green]Switched to: {collection}[/green]")
 
         elif action == "View Collections":
             show_collections()
 
-        if not questionary.confirm("Continue managing collections?").ask():
-            return True
+
+def show_help():
+    """Display help information about the system."""
+    help_text = """
+[bold blue]Agentic RAG System Help[/bold blue]
+
+[cyan]Overview:[/cyan]
+This system combines Retrieval-Augmented Generation (RAG) with agentic capabilities for intelligent document processing and querying.
+
+[cyan]Key Features:[/cyan]
+• Multiple Collections: Organize documents in separate knowledge bases
+• PDF Processing: Advanced PDF conversion with layout preservation
+• Smart Querying: Intelligent query decomposition and analysis
+• Performance Metrics: Track and optimize system performance
+
+[cyan]Tips for Optimal Use:[/cyan]
+1. Collections
+   • Create separate collections for different topics/projects
+   • Use meaningful collection names for easy navigation
+
+2. PDF Loading
+   • Ensure PDFs are text-searchable for best results
+   • Large PDFs (>50MB) may take longer to process
+   • The system preserves document layout and handles equations
+
+3. Querying
+   • Be specific in your questions for better results
+   • Complex queries are automatically broken down
+   • Use follow-up questions to refine results
+
+4. Performance
+   • Monitor relevance and coherence scores
+   • System automatically adjusts retrieval strategy
+   • MPS acceleration is enabled on Apple Silicon
+
+[cyan]Device Information:[/cyan]
+• Current Device: [green]{DEVICE}[/green]
+• Optimized for: Apple Silicon (when available)
+"""
+    console.print(Panel(help_text, title="System Help", border_style="blue"))
 
 
 def handle_metrics_view() -> bool:
@@ -297,29 +434,55 @@ def handle_metrics_view() -> bool:
         if not metrics:
             console.print("[yellow]No performance metrics available yet[/yellow]")
         else:
-            console.print("[blue]Performance Metrics:[/blue]")
+            console.print("\n[blue]Performance Metrics:[/blue]")
             for i, metric in enumerate(metrics, 1):
-                console.print(f"Query {i}:")
-                console.print(f"  Relevance: {metric['relevance']:.2f}")
-                console.print(f"  Coherence: {metric['coherence']:.2f}")
+                console.print(
+                    f"[cyan]Query {i}:[/cyan] {metric['query']}\n"
+                    f"  Relevance: {metric['relevance']:.2f} | "
+                    f"Coherence: {metric['coherence']:.2f}"
+                )
 
-    return questionary.confirm("Return to Main Menu?").ask()
+    return questionary.select(
+        "What would you like to do?",
+        choices=["View More Details", "← Back"]
+    ).ask() == "View More Details"
 
 
 @app.command()
 def main_menu():
     """Run the main menu interface"""
-    console.print("[bold green]Welcome to Agentic RAG System[/bold green]")
-
+    console.print(Panel.fit(
+        "[bold green]Welcome to Agentic RAG System[/bold green]\n"
+        "[cyan]Your intelligent document assistant powered by RAG technology[/cyan]\n"
+        "Type '← Help' at any time to access system information",
+        title="👋 Welcome",
+        border_style="green"
+    ))
+    
+    menu_items = [
+        "Manage Collections",
+        "Load PDFs",
+        "Query System",
+        "View Performance Metrics",
+        questionary.Separator(),
+        "← Help",
+        questionary.Separator(),
+        "Exit"
+    ]
+    
     while True:
-        action = questionary.select(
-            "Main Menu:",
-            choices=["Manage Collections", "Load PDFs", "Query System", "View Performance Metrics", "Exit"],
-        ).ask()
+        console.print(f"\n[bold cyan]Current Collection: {RAGSingleton._current_collection}[/bold cyan]")
+        action = questionary.select("Main Menu:", choices=menu_items).ask()
 
         if action == "Exit":
-            console.print("[green]Thank you for using Agentic RAG System![/green]")
+            console.print(Panel.fit(
+                "[green]Thank you for using Agentic RAG System![/green]\n"
+                "Your session has been saved.",
+                border_style="green"
+            ))
             break
+        elif action == "← Help":
+            show_help()
         elif action == "Manage Collections":
             if not handle_collection_management():
                 break
@@ -331,7 +494,6 @@ def main_menu():
                 break
         elif action == "View Performance Metrics":
             if not handle_metrics_view():
-                console.print("[green]Thank you for using Agentic RAG System![/green]")
                 break
 
 
@@ -361,6 +523,25 @@ def load_pdf(pdf_path: str):
         TimeRemainingColumn(),
     ) as progress:
         load_pdf_with_progress(pdf_path, progress)
+
+
+@app.command()
+def help():
+    """Show system help information"""
+    show_help()
+
+
+@app.command()
+def version():
+    """Show system version information"""
+    console.print(Panel.fit(
+        "[bold green]Agentic RAG System[/bold green]\n"
+        "Version: 1.0.0\n"
+        f"Running on: {DEVICE}\n"
+        "Made with ❤️ for document intelligence",
+        title="Version Info",
+        border_style="blue"
+    ))
 
 
 if __name__ == "__main__":
